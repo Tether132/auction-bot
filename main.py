@@ -1,77 +1,109 @@
 import telebot
 import requests
-import os
+from bs4 import BeautifulSoup
 from telebot import types
 from flask import Flask
 from threading import Thread
+import re
 
-# --- إعداداتك الخاصة ---
-BOT_TOKEN = "8257393953:AAFqii_USR1h7fe2kj4IoSS31e0PDaDikGc"
+# --- الإعدادات ---
+API_TOKEN = 'ضع_توكن_بوتك_هنا' # استبدل هذا النص بتوكن البوت الخاص بك
 ADMIN_ID = 93037697
-DEV_USER = "@M_9_C"
-CHANNEL_ID = "@usbsbyy"
+CHANNEL_ID = '@usbsbyy'
 
-bot = telebot.TeleBot(BOT_TOKEN)
+bot = telebot.TeleBot(API_TOKEN)
 app = Flask('')
 
-# --- نظام التشغيل المستمر المتوافق مع Railway ---
 @app.route('/')
-def home(): 
-    return "Bot is Running!"
+def home(): return "Bot is alive!"
 
-def run():
-    # Railway يحدد المنفذ تلقائياً عبر متغير البيئة PORT
-    port = int(os.environ.get("PORT", 8080))
-    app.run(host='0.0.0.0', port=port)
+def run(): app.run(host='0.0.0.0', port=8080)
 
-def keep_alive():
-    t = Thread(target=run)
-    t.start()
+# دالة سحب المعلومات من روابط تليجرام (t.me/nft)
+def fetch_gift_info(url):
+    try:
+        headers = {'User-Agent': 'Mozilla/5.0'}
+        response = requests.get(url, headers=headers, timeout=10)
+        soup = BeautifulSoup(response.text, 'html.parser')
+        
+        # سحب الاسم من العنوان
+        title = soup.find('meta', property='og:title')
+        full_title = title['content'] if title else "Gift"
+        gift_name = full_title.replace('Telegram: Gift ', '').strip()
+        
+        # سحب السعر من الوصف
+        desc = soup.find('meta', property='og:description')
+        desc_text = desc['content'] if desc else ""
+        
+        price = "غير محدد"
+        price_match = re.search(r'(\d+\.?\d*)\s?TON', desc_text)
+        if price_match:
+            price = f"{price_match.group(1)} TON"
 
-# --- واجهة البوت ---
-def main_markup():
-    markup = types.ReplyKeyboardMarkup(resize_keyboard=True)
-    markup.row("إرسال طلب مزاد ➕")
-    markup.row("طلباتي 📋", "الدعم الفني 🛠")
-    return markup
+        return gift_name, price
+    except:
+        return "Gift", "غير محدد"
+
+def escape_md(text):
+    for char in ['_', '*', '[', ']', '(', ')', '~', '`', '#', '+', '-', '=', '|', '{', '}', '.', '!']:
+        text = str(text).replace(char, f'\\{char}')
+    return text
+
+temp_data = {}
 
 @bot.message_handler(commands=['start'])
-def start(m):
-    bot.send_message(m.chat.id, f"أهلاً بك في بوت المزاد.\nالمطور: {DEV_USER}", reply_markup=main_markup())
+def welcome(message):
+    markup = types.ReplyKeyboardMarkup(row_width=1, resize_keyboard=True)
+    markup.add(types.KeyboardButton('إرسال طلب مزاد ➕'))
+    bot.send_message(message.chat.id, "مرحباً بك في بوت المزادات الذكي!", reply_markup=markup)
 
-@bot.message_handler(func=lambda m: m.text == "إرسال طلب مزاد ➕")
-def ask_auction(m):
-    msg = bot.send_message(m.chat.id, "أرسل رابط الهدية أو معرف اليوزر الآن:")
-    bot.register_next_step_handler(msg, send_to_admin)
+@bot.message_handler(func=lambda message: message.text == 'إرسال طلب مزاد ➕')
+def ask_link(message):
+    msg = bot.send_message(message.chat.id, "🔗 أرسل رابط الهدية فقط (t.me/nft/...) :")
+    bot.register_next_step_handler(msg, process_link)
 
-def send_to_admin(m):
-    markup = types.InlineKeyboardMarkup()
-    markup.add(types.InlineKeyboardButton("قبول ✅", callback_data=f"accept_{m.from_user.id}"),
-               types.InlineKeyboardButton("رفض ❌", callback_data=f"reject_{m.from_user.id}"))
+def process_link(message):
+    url = message.text
+    if "t.me/" not in url:
+        bot.send_message(message.chat.id, "❌ يرجى إرسال رابط تليجرام صحيح.")
+        return
+
+    bot.send_message(message.chat.id, "⏳ جاري فحص الرابط وسحب البيانات...")
+    name, price = fetch_gift_info(url)
+    temp_data[message.chat.id] = {"name": name, "price": price, "url": url}
     
-    bot.send_message(ADMIN_ID, f"👤 طلب من: @{m.from_user.username}\n📝 المحتوى: {m.text}", reply_markup=markup)
-    bot.reply_to(m, "✅ تم إرسال طلبك للأدمن.")
+    admin_text = f"🚨 طلب مزاد جديد:\n\nالهدية: {name}\nالسعر: {price}\nالرابط: {url}"
+    markup = types.InlineKeyboardMarkup()
+    markup.add(types.InlineKeyboardButton("قبول ✅", callback_data=f"accept_{message.chat.id}"),
+               types.InlineKeyboardButton("رفض ❌", callback_data=f"reject_{message.chat.id}"))
+    
+    bot.send_message(ADMIN_ID, admin_text, reply_markup=markup)
+    bot.send_message(message.chat.id, "✅ تم إرسال الطلب للإدارة.")
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith('accept_'))
-def accept(call):
-    user_id = call.data.split('_')[1]
-    # تنسيق المنشور كما في الصورة
-    text = (
-        "📊 **New Auction Entry**\n\n"
-        f"Gift - Auction offers • [Click]({call.message.text.split(': ')[-1]})\n\n"
-        "❞ زايد تدريجيًا ( 1as / 1ton / 1us / 30egp ) ❝\n"
-        f"❞ Auction ch : {CHANNEL_ID} ❝"
-    )
-    
-    # النشر في القناة
-    pub = bot.send_message(CHANNEL_ID, text, parse_mode="Markdown", disable_web_page_preview=False)
-    
-    # إشعار للمستخدم
-    bot.send_message(user_id, f"🥳 تم قبول طلبك بنجاح!\nرابط المزاد: https://t.me/{CHANNEL_ID[1:]}/{pub.message_id}")
-    bot.edit_message_text("✅ تم النشر في القناة.", call.message.chat.id, call.message.message_id)
+def handle_accept(call):
+    u_id = int(call.data.split('_')[1])
+    info = temp_data.get(u_id)
+    if info:
+        n = escape_md(info['name'])
+        p = escape_md(info['price'])
+        u = escape_md(info['url'])
 
-# --- تشغيل البوت ---
-if __name__ == "__main__":
-    keep_alive()
-    print("Bot started...")
-    bot.infinity_polling()
+        # التنسيق بنفس دقة الصورة التي أرسلتها
+        auction_msg = (
+            f"📊 *Gift details :*\n"
+            f"**\n"
+            f"> 🎁 *Gift 1:* {n}\n"
+            f"> 🔗 *Link:* [اضغط هنا للرابط]({u})\n"
+            f"**\n"
+            f"💰 *Portal Price :* {p}"
+        )
+        sent = bot.send_message(CHANNEL_ID, auction_msg, parse_mode="MarkdownV2")
+        
+        # التعليق التلقائي الفوري
+        comment = f"💬 *بداية المناقشة*\n**\n> جاري استقبال المزايدات هنا 👇"
+        bot.reply_to(sent, comment, parse_mode="MarkdownV2")
+        bot.answer_callback_query(call.id, "✅ تم النشر")
+
+Thread(target=run).start()
+bot.infinity_polling()
